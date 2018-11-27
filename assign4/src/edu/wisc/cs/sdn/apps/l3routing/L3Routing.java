@@ -28,6 +28,14 @@ import net.floodlightcontroller.linkdiscovery.ILinkDiscoveryListener;
 import net.floodlightcontroller.linkdiscovery.ILinkDiscoveryService;
 import net.floodlightcontroller.routing.Link;
 
+import org.openflow.protocol.OFMatch;
+import org.openflow.protocol.action.OFAction;
+import org.openflow.protocol.action.OFActionOutput;
+import org.openflow.protocol.instruction.OFInstruction;
+import org.openflow.protocol.instruction.OFInstructionApplyActions;
+
+import edu.wisc.cs.sdn.apps.util.SwitchCommands;
+
 public class L3Routing implements IFloodlightModule, IOFSwitchListener, 
 		ILinkDiscoveryListener, IDeviceListener
 {
@@ -51,6 +59,8 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
     // Map of hosts to devices
     private Map<IDevice,Host> knownHosts;
 
+	// record previous compute result
+	private Map<IOFSwitch, Map<Long, Link>> preResult;
 	/**
      * Loads dependencies and initializes data structures.
      */
@@ -67,7 +77,8 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
         this.linkDiscProv = context.getServiceImpl(ILinkDiscoveryService.class);
         this.deviceProv = context.getServiceImpl(IDeviceService.class);
         
-        this.knownHosts = new ConcurrentHashMap<IDevice,Host>();
+		this.knownHosts = new ConcurrentHashMap<IDevice,Host>();
+		this.preResult = new ConcurrentHashMap<IOFSwitch, Map<Long, Link>>();
 	}
 
 	/**
@@ -123,7 +134,7 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
 			
 			/*****************************************************************/
 			/* TODO: Update routing: add rules to route to new host          */
-			
+			this.computingShortestPaths(host);
 			/*****************************************************************/
 		}
 	}
@@ -145,7 +156,10 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
 		
 		/*********************************************************************/
 		/* TODO: Update routing: remove rules to route to host               */
-		
+		Map<Long, IOFSwitch> switches = this.getSwitches();
+		for (IOFSwitch s : switches.values()) {
+			this.removeHost(s, host);
+		}
 		/*********************************************************************/
 	}
 
@@ -173,7 +187,12 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
 		
 		/*********************************************************************/
 		/* TODO: Update routing: change rules to route to host               */
-		
+		Map<Long, IOFSwitch> switches = this.getSwitches();
+		for (IOFSwitch s : switches.values()) {
+			this.removeHost(s, host);
+		}
+
+		this.computingShortestPaths(host);
 		/*********************************************************************/
 	}
 	
@@ -189,7 +208,7 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
 		
 		/*********************************************************************/
 		/* TODO: Update routing: change routing rules for all hosts          */
-		
+		this.updateTopology();
 		/*********************************************************************/
 	}
 
@@ -205,7 +224,7 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
 		
 		/*********************************************************************/
 		/* TODO: Update routing: change routing rules for all hosts          */
-		
+		this.updateTopology();
 		/*********************************************************************/
 	}
 
@@ -236,7 +255,7 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
 		
 		/*********************************************************************/
 		/* TODO: Update routing: change routing rules for all hosts          */
-		
+		this.updateTopology();
 		/*********************************************************************/
 	}
 
@@ -344,5 +363,110 @@ public class L3Routing implements IFloodlightModule, IOFSwitchListener,
         floodlightService.add(ILinkDiscoveryService.class);
         floodlightService.add(IDeviceService.class);
         return floodlightService;
+	}
+
+	private void computingShortestPaths(Host host) {
+		// If the method returns false, then you do not need to install any rules to route traffic to this host.
+		if (!host.isAttachedToSwitch())	{
+			return;
+		}
+
+		Collection<Host> hosts = getHosts();
+		Map<Long, IOFSwitch> switches = getSwitches();
+		
+		IOFSwitch dst = host.getSwitch();
+
+		if (!this.preResult.containsKey(dst)) {
+			// Use the Bellman-Ford algorithm to compute the shortest paths if the switch is newly added.
+			this.preResult.put(dst, BellmanFord(dst));
+		}
+
+		for (IOFSwitch s : switches.values()) {
+			if (s.equals(dst)) { 
+				installingRules(s, host, host.getPort());
+			} else {
+				if (!this.preResult.containsKey(dst)) {
+					continue;
+				}
+				
+				if (!this.preResult.get(dst).containsKey(s.getId())) {
+					continue;
+				}
+
+				installingRules(s, host, this.preResult.get(dst).get(s.getId()).getDstPort());	
+			}
+		}
+	}
+
+	private Map<Long, Link> BellmanFord(IOFSwitch dst) {
+		Collection<Link> links = this.getLinks();
+		Map<Long, IOFSwitch> switches = this.getSwitches();
+
+		Map<Long, Link> shortestPath = new ConcurrentHashMap<Long, Link>();
+
+		Map<IOFSwitch, Integer> weights = new ConcurrentHashMap<IOFSwitch, Integer>();
+
+		for (IOFSwitch s : switches.values()) {
+			if (s.equals(dst)) {
+				weights.put(s, 0);
+			}
+			else weights.put(s, Integer.MAX_VALUE - 1);
+		}
+
+		for (IOFSwitch s : switches.values()) {
+			for(Link link : links) {
+				if (!weights.containsKey(switches.get(link.getSrc())) || !weights.containsKey(switches.get(link.getDst()))) {
+					continue;
+				}
+
+				if (weights.get(switches.get(link.getSrc())) + 1 < weights.get(switches.get(link.getDst()))) {
+					weights.put(switches.get(link.getDst()), weights.get(switches.get(link.getSrc())) + 1);
+					shortestPath.put(link.getDst(), link);
+				}
+			}
+		}
+
+		return shortestPath;
+	}
+
+	private void installingRules(IOFSwitch sw, Host dst, int port) {
+		OFMatch match = new OFMatch();
+		match.setDataLayerType(OFMatch.ETH_TYPE_IPV4);
+		match.setNetworkDestination(dst.getIPv4Address());
+
+		OFActionOutput action = new OFActionOutput(port);
+
+		List<OFAction> actions = new ArrayList<OFAction>();
+		actions.add(action);
+
+		OFInstruction instruction = new OFInstructionApplyActions(actions);
+
+		List<OFInstruction> instructions = new ArrayList<OFInstruction>();
+		instructions.add(instruction);
+		SwitchCommands.installRule(sw, table, SwitchCommands.DEFAULT_PRIORITY, match, instructions);
+	}
+
+	private void removeHost(IOFSwitch sw, Host dst) {
+        OFMatch match = new OFMatch();
+        match.setDataLayerType(OFMatch.ETH_TYPE_IPV4);
+        match.setNetworkDestination(dst.getIPv4Address());
+        SwitchCommands.removeRules(sw, table, match);
+	}
+	
+	private void updateTopology() {
+		Collection<Host> hosts = this.getHosts();
+        Map<Long, IOFSwitch> switches = this.getSwitches();
+		
+		this.preResult = new ConcurrentHashMap<IOFSwitch, Map<Long, Link>>();
+        for (IOFSwitch s : switches.values()) {
+            this.preResult.put(s, BellmanFord(s));
+			for (Host host : hosts) {
+				this.removeHost(switches.get(s.getId()), host);
+			}
+		}
+
+        for (Host host : hosts) {
+            this.computingShortestPaths(host);
+        }
 	}
 }

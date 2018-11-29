@@ -155,16 +155,18 @@ public class LoadBalancer implements IFloodlightModule, IOFSwitchListener,
 			OFInstruction ipInstr = new OFInstructionApplyActions(Arrays.asList(ipAction));
 			SwitchCommands.installRule(sw, this.table, (short)(SwitchCommands.DEFAULT_PRIORITY+1), 
 										ipMatchCriteria, Arrays.asList(ipInstr));
-			// ARP rules
-			OFMatch arpMatchCriteria = new OFMatch();
-			arpMatchCriteria.setField(OFOXMFieldType.ARP_TPA, virtualIP);
-			//arpMatchCriteria.setDataLayerType(OFMatch.ETH_TYPE_ARP);
-			//arpMatchCriteria.setNetworkDestination(virtualIP);
-			OFAction arpAction = new OFActionOutput(OFPort.OFPP_CONTROLLER);
-			OFInstruction arpInstr = new OFInstructionApplyActions(Arrays.asList(arpAction));
-			SwitchCommands.installRule(sw, this.table, (short)(SwitchCommands.DEFAULT_PRIORITY+1), 
-										arpMatchCriteria, Arrays.asList(arpInstr));
 		}
+		
+		// ARP rules
+		OFMatch arpMatchCriteria = new OFMatch();
+		arpMatchCriteria.setDataLayerType(OFMatch.ETH_TYPE_ARP);
+		//arpMatchCriteria.setNetworkDestination(virtualIP);
+		//arpMatchCriteria.setField(OFOXMFieldType.ARP_TPA, virtualIP);
+		OFAction arpAction = new OFActionOutput(OFPort.OFPP_CONTROLLER);
+		OFInstruction arpInstr = new OFInstructionApplyActions(Arrays.asList(arpAction));
+		SwitchCommands.installRule(sw, this.table, (short)(SwitchCommands.DEFAULT_PRIORITY+1), 
+												arpMatchCriteria, Arrays.asList(arpInstr));
+		
 		// all other packets to the next rule table in the switch 
 		OFInstruction l3RoutingInstr = new OFInstructionGotoTable(L3Routing.table);
 		SwitchCommands.installRule(sw, this.table, SwitchCommands.DEFAULT_PRIORITY, 
